@@ -14,6 +14,10 @@
   var REV_LIMIT = 300;            // 修订稿字数上限（按 Unicode 字符计）
   var PROTECT_MAX = 20;           // 专名保护词数量上限
   var PROTECT_MAX_LEN = 12;       // 单个专名保护词的 Unicode 字符上限
+  var QR_BAND_MM = 22;            // 启用二维码时底部固定预留高度
+  var QR_SIZE_MM = 18;            // 二维码码图尺寸（居中置于 22mm 区域内）
+  var QR_MAX_BYTES = 100;         // 二维码链接 UTF-8 字节上限
+  var QR_ERROR_LEVEL = 'M';       // QR 纠错等级 M（约 15% 容错，码密度与可扫性折中）
 
   var el = {
     title: document.getElementById('title'),
@@ -23,6 +27,8 @@
     revCount: document.getElementById('revCount'),
     protect: document.getElementById('protect'),
     protectHint: document.getElementById('protectHint'),
+    qrUrl: document.getElementById('qrUrl'),
+    qrHint: document.getElementById('qrHint'),
     widthMm: document.getElementById('widthMm'),
     heightMm: document.getElementById('heightMm'),
     printBtn: document.getElementById('printBtn'),
@@ -33,6 +39,8 @@
     labelContent: document.getElementById('labelContent'),
     labelBody: document.getElementById('labelBody'),
     labelBodyEn: document.getElementById('labelBodyEn'),
+    labelQr: document.getElementById('labelQr'),
+    labelQrSvg: document.getElementById('labelQrSvg'),
     labelError: document.getElementById('labelError'),
     compare: document.getElementById('compare'),
     diffView: document.getElementById('diffView'),
@@ -125,6 +133,143 @@
     return ch >= 0x2000 && ch <= 0x200a;
   }
 
+  // ---------- 展品介绍二维码（完全在浏览器本地生成，不依赖外部服务） ----------
+  // 规则：可选；留空（含仅空白）恢复无二维码原版式；
+  //   非空时必须是 https:// 链接，UTF-8 编码不超过 100 字节，且不得含任何空白字符；
+  //   非法或库无法编码时返回 error，由调用方报错并禁用打印。
+  function parseQrLink(raw) {
+    var value = String(raw == null ? '' : raw).trim();
+    if (!value) return { url: '', active: false, bytes: 0 };
+    var bytes;
+    try {
+      bytes = utf8ByteLength(value);
+    } catch (e) {
+      return { error: '无法计算链接的 UTF-8 字节数：' + value };
+    }
+    if (bytes > QR_MAX_BYTES) {
+      return {
+        error: '二维码链接的 UTF-8 长度为 ' + bytes + ' 字节，超过上限 ' +
+          QR_MAX_BYTES + ' 字节（一个中文约 3 字节），请缩短链接。'
+      };
+    }
+    var cps = Array.from(value);
+    for (var i = 0; i < cps.length; i++) {
+      var ch = cps[i].codePointAt(0);
+      // 控制字符一律不接受；其余空白字符（含全角空格、不间断空格等）也明确报错
+      if (ch < 0x20 || ch === 0x7f || isWhitespaceCp(ch)) {
+        return {
+          error: '二维码链接中不得包含空白或控制字符，请删除其中的空格/换行后重试。'
+        };
+      }
+    }
+    var u;
+    try {
+      u = new URL(value);
+    } catch (e) {
+      return { error: '二维码链接不是合法的 URL：「' + value + '」，请填写完整的 https:// 链接。' };
+    }
+    if (u.protocol !== 'https:') {
+      return {
+        error: '二维码链接仅支持 https:// 开头的安全链接，当前协议为「' +
+          (u.protocol || '未知') + '」，请改用 HTTPS 链接。'
+      };
+    }
+    if (!u.host) {
+      return { error: '二维码链接缺少主机名（域名），请填写完整的 https:// 链接。' };
+    }
+    return { url: value, active: true, bytes: bytes };
+  }
+
+  // UTF-8 字节数（码点级计算，正确处理增补平面）
+  function utf8ByteLength(s) {
+    var n = 0;
+    var cps = Array.from(String(s));
+    for (var i = 0; i < cps.length; i++) {
+      var cp = cps[i].codePointAt(0);
+      if (cp < 0x80) n += 1;
+      else if (cp < 0x800) n += 2;
+      else if (cp < 0x10000) n += 3;
+      else n += 4;
+    }
+    return n;
+  }
+
+  // 本地生成 QR 矩阵（typeNumber=0 自动选最小版本；M 级纠错）。
+  // qrcode-generator 的默认字节转换只取低 8 位，必须显式切换为 UTF-8。
+  // 返回 { count:number, isDark:(r,c)=>boolean }；任何失败抛出由调用方捕获。
+  var qrcodeLib = window.qrcode;
+  var qrMatrixCache = Object.create(null);
+  function getQrMatrix(url) {
+    if (qrMatrixCache[url]) return qrMatrixCache[url];
+    if (!qrcodeLib || typeof qrcodeLib !== 'function') {
+      throw new Error('二维码库未加载（请检查本地脚本 /js/vendor/qrcode-generator.js）。');
+    }
+    var savedStringToBytes = qrcodeLib.stringToBytes;
+    var qr;
+    try {
+      qrcodeLib.stringToBytes = qrcodeLib.stringToBytesFuncs['UTF-8'];
+      qr = qrcodeLib(0, QR_ERROR_LEVEL);
+      qr.addData(url);
+      qr.make();
+    } finally {
+      qrcodeLib.stringToBytes = savedStringToBytes;
+    }
+    var count = qr.getModuleCount();
+    var rows = [];
+    for (var r = 0; r < count; r++) {
+      var row = '';
+      for (var c = 0; c < count; c++) row += qr.isDark(r, c) ? '1' : '0';
+      rows.push(row);
+    }
+    var matrix = {
+      count: count,
+      isDark: function (rr, cc) { return rows[rr].charAt(cc) === '1'; }
+    };
+    qrMatrixCache[url] = matrix;
+    return matrix;
+  }
+
+  // 把矩阵渲染为单个内联 SVG（预览与打印共用同一个节点，保证码图一致）。
+  // 坐标以「模块」为单位，CSS 尺寸固定 18mm，缩放交给浏览器（矢量，打印不糊）。
+  // 码图内含 QR 标准要求的 4 模块白边（quiet zone）：18mm 为含白边的整个符号尺寸，
+  // 这样即使外部排版空白不足 4 模块宽，扫码也不受影响。
+  var QR_QUIET = 4;
+  function buildQrSvg(matrix) {
+    var n = matrix.count;
+    var span = n + QR_QUIET * 2;
+    var ns = 'http://www.w3.org/2000/svg';
+    while (el.labelQrSvg.firstChild) el.labelQrSvg.removeChild(el.labelQrSvg.firstChild);
+    el.labelQrSvg.setAttribute('viewBox', '0 0 ' + span + ' ' + span);
+    el.labelQrSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    el.labelQrSvg.setAttribute('width', QR_SIZE_MM + 'mm');
+    el.labelQrSvg.setAttribute('height', QR_SIZE_MM + 'mm');
+    el.labelQrSvg.setAttribute('role', 'img');
+    el.labelQrSvg.setAttribute('aria-label', '展品介绍二维码');
+
+    var bg = document.createElementNS(ns, 'rect');
+    bg.setAttribute('x', '0');
+    bg.setAttribute('y', '0');
+    bg.setAttribute('width', String(span));
+    bg.setAttribute('height', String(span));
+    bg.setAttribute('fill', '#ffffff');
+    el.labelQrSvg.appendChild(bg);
+
+    var path = document.createElementNS(ns, 'path');
+    // 每个模块画 1.02 单位的方块，微重叠避免缩放后出现白缝；
+    // 相邻模块合并到同一矩形路径段，减少节点数。
+    var d = '';
+    for (var r = 0; r < n; r++) {
+      for (var c = 0; c < n; c++) {
+        if (matrix.isDark(r, c)) {
+          d += 'M' + (c + QR_QUIET) + ',' + (r + QR_QUIET) + 'h1.02v1.02h-1.02z';
+        }
+      }
+    }
+    path.setAttribute('d', d);
+    path.setAttribute('fill', '#000000');
+    el.labelQrSvg.appendChild(path);
+  }
+
   // ---------- 一次排版尝试 ----------
   // 单栏（无英文译文）：正文占满内容宽。
   // 双栏（填写译文）：标题横跨整签，中文/英文按扣除 6mm 栏间距后的实际栏宽
@@ -133,11 +278,21 @@
   // 各种返回均带 zhLines / enLines（中文/英文行数；宽度失败无法规划时为 null），
   // 供修订对照表展示两版行数。
   function tryLayout(input, widthMm, heightMm, bodyPx) {
+    var qr = !!input.qrActive;
     var contentW = (widthMm - PADDING_MM * 2) * PX_PER_MM;
-    var contentH = (heightMm - PADDING_MM * 2) * PX_PER_MM;
-    if (contentW <= 4 || contentH <= 4) {
-      return { ok: false, reason: 'config', message: '标签尺寸过小：内边距为 8mm，请加大宽或高。' };
+    // 启用二维码时，正文可用高度先行扣除底部固定 22mm 区域，再按现有规则选字号
+    var contentH = (heightMm - PADDING_MM * 2 - (qr ? QR_BAND_MM : 0)) * PX_PER_MM;
+    var hasAnyText = !!(input.titleTrim || input.bodyTrim || (input.dual && input.enTrim));
+    if (contentW <= 4 || (contentH <= 4 && hasAnyText)) {
+      var minH = PADDING_MM * 2 + (qr ? QR_BAND_MM : 0);
+      return {
+        ok: false, reason: 'config', qr: qr,
+        message: '标签尺寸过小：内边距为 8mm' +
+          (qr ? '，启用二维码后底部还需预留 ' + QR_BAND_MM + 'mm' : '') +
+          '，标签高度需大于 ' + minH + 'mm，请加大宽或高。'
+      };
     }
+    if (contentH < 0) contentH = 0;
 
     var dual = !!input.dual;
     var hasZh = !!input.bodyTrim;
@@ -156,7 +311,7 @@
       if (hasZh) narrow.push({ key: 'zh', widthMm: 0 });
       if (dual && hasEn) narrow.push({ key: 'en', widthMm: 0 });
       return {
-        ok: false, reason: 'width', bodyPx: bodyPx, widthFailures: narrow,
+        ok: false, reason: 'width', qr: qr, bodyPx: bodyPx, widthFailures: narrow,
         zhLines: null, enLines: null
       };
     }
@@ -192,7 +347,7 @@
 
     if (widthFailures.length) {
       return {
-        ok: false, reason: 'width', bodyPx: bodyPx, widthFailures: widthFailures,
+        ok: false, reason: 'width', qr: qr, bodyPx: bodyPx, widthFailures: widthFailures,
         zhLines: zhPlan && !zhPlan.error ? zhPlan.totalLines : null,
         enLines: enPlan && !enPlan.error ? enPlan.totalLines : null
       };
@@ -205,7 +360,7 @@
 
     if (!titlePlan && !zhPlan && !enPlan) {
       return {
-        ok: true, dual: dual, titlePlan: null, zhPlan: null, enPlan: null,
+        ok: true, qr: qr, dual: dual, titlePlan: null, zhPlan: null, enPlan: null,
         bodyPx: bodyPx, titlePx: titlePx, contentH: 0, colWMm: colW / PX_PER_MM,
         zhLines: 0, enLines: 0
       };
@@ -224,7 +379,7 @@
 
     if (totalH > contentH + 0.75) {
       return {
-        ok: false, reason: 'height', bodyPx: bodyPx,
+        ok: false, reason: 'height', qr: qr, bodyPx: bodyPx,
         totalH: totalH, contentH: contentH,
         zhH: zhH, enH: enH, titleH: titleH + titleGap,
         zhLines: zhPlan ? zhPlan.totalLines : 0,
@@ -233,7 +388,7 @@
     }
 
     return {
-      ok: true, dual: dual, titlePlan: titlePlan, zhPlan: zhPlan, enPlan: enPlan,
+      ok: true, qr: qr, dual: dual, titlePlan: titlePlan, zhPlan: zhPlan, enPlan: enPlan,
       bodyPx: bodyPx, titlePx: titlePx, contentH: totalH,
       zhH: zhH, enH: enH, colWMm: colW / PX_PER_MM,
       zhLines: zhPlan ? zhPlan.totalLines : 0,
@@ -256,7 +411,8 @@
     }
     // 12px 仍超高
     return lastHeightFailure || {
-      ok: false, reason: 'height', bodyPx: MIN_BODY, totalH: 0, contentH: 0
+      ok: false, reason: 'height', qr: !!input.qrActive,
+      bodyPx: MIN_BODY, totalH: 0, contentH: 0
     };
   }
 
@@ -309,7 +465,11 @@
       if (result.enH > result.zhH) where = '（英文译文栏较高）';
       else if (result.zhH > 0) where = '（中文原文栏较高）';
     }
-    return '内容在 12–24px 任何字号下都超出标签高度' + where + '（需要约 ' +
+    var qrNote = result.qr
+      ? '（已扣除底部二维码预留的 ' + QR_BAND_MM + 'mm）'
+      : '';
+    return '内容在 12–24px 任何字号下都超出标签高度' + where +
+      qrNote + '（文本需要约 ' +
       Math.round(result.totalH / PX_PER_MM) + 'mm，可用 ' +
       Math.round(result.contentH / PX_PER_MM) + 'mm）。\n' +
       '请加高标签或精简文案——不会截断显示。';
@@ -353,6 +513,10 @@
 
     el.labelError.hidden = true;
 
+    // 码图已在 render() 中按链接生成并缓存；成功排版时按是否启用同步显隐。
+    // 预览与打印使用同一个 SVG 节点（18mm、同一矩阵），不存在两套码图。
+    el.labelQr.hidden = !input.qrActive;
+
     el.labelTitle.innerHTML = '';
     if (result.titlePlan) {
       buildLines(el.labelTitle, result.titlePlan);
@@ -382,8 +546,13 @@
       info += '，正文 ' + result.zhPlan.totalLines + ' 行';
     }
     if (result.titlePlan) info += '，标题 ' + result.titlePlan.totalLines + ' 行';
-    info += '，内容高约 ' + usedH + 'mm / ' +
-      Math.round(input.heightMm - PADDING_MM * 2) + 'mm';
+    info += '，文本高约 ' + usedH + 'mm / ' +
+      Math.round(input.heightMm - PADDING_MM * 2 - (input.qrActive ? QR_BAND_MM : 0)) +
+      'mm';
+    if (input.qrActive) {
+      info += '；已在底部预留 ' + QR_BAND_MM + 'mm 二维码区（码图 ' +
+        QR_SIZE_MM + 'mm 居中）';
+    }
     return info;
   }
 
@@ -559,6 +728,42 @@
         (dupCount > 0 ? '（已自动忽略 ' + dupCount + ' 个重复词）' : '')
       : '未设置保护词';
 
+    // 展品介绍二维码：留空恢复原版式；非法/无法编码则明确报错并禁用打印。
+    // 码图在本地由 qrcode-generator 生成，原稿与修订稿共用同一链接、同一份矩阵。
+    var parsedQr = parseQrLink(el.qrUrl.value);
+    el.qrHint.classList.toggle('err', !!parsedQr.error);
+    if (parsedQr.error) {
+      el.qrHint.textContent = parsedQr.error;
+      setStatus('展品介绍二维码：' + parsedQr.error, 'err');
+      showError('二维码链接有误\n' + parsedQr.error);
+      el.printBtn.disabled = true;
+      fitScale();
+      return;
+    }
+    input.qrActive = parsedQr.active;
+    input.qrUrl = parsedQr.url;
+    if (parsedQr.active) {
+      var qrMatrix;
+      try {
+        qrMatrix = getQrMatrix(parsedQr.url);
+      } catch (e) {
+        var qrErr = '二维码无法编码：' + (e && e.message ? e.message : String(e));
+        el.qrHint.classList.add('err');
+        el.qrHint.textContent = qrErr;
+        setStatus('展品介绍二维码：' + qrErr, 'err');
+        showError('二维码无法编码\n' + qrErr);
+        el.printBtn.disabled = true;
+        fitScale();
+        return;
+      }
+      buildQrSvg(qrMatrix); // 同一份 SVG 供预览与打印使用
+      el.qrHint.textContent =
+        '已启用二维码：' + parsedQr.bytes + ' / ' + QR_MAX_BYTES +
+        ' 字节（UTF-8），码图 ' + QR_SIZE_MM + 'mm，底部预留 ' + QR_BAND_MM + 'mm';
+    } else {
+      el.qrHint.textContent = '未设置二维码：展签底部不预留二维码区域';
+    }
+
     // 修订稿非空白即进入对照模式；新填写修订稿时默认以修订稿为成品
     var revTrim = el.bodyRev.value.trim();
     var revActive = revTrim.length > 0;
@@ -594,7 +799,9 @@
       bodyEn: input.bodyEn,
       widthMm: input.widthMm,
       heightMm: input.heightMm,
-      protectedWords: input.protectedWords
+      protectedWords: input.protectedWords,
+      qrActive: input.qrActive,
+      qrUrl: input.qrUrl
     };
     revInput.titleTrim = input.titleTrim;
     revInput.bodyTrim = revTrim;
@@ -627,6 +834,7 @@
     el.labelTitle.innerHTML = '';
     el.labelBody.innerHTML = '';
     el.labelBodyEn.innerHTML = '';
+    el.labelQr.hidden = true;
   }
 
   function setStatus(text, kind) {
@@ -679,6 +887,7 @@
     el.body.addEventListener(evt, schedule);
     el.bodyEn.addEventListener(evt, schedule);
     el.protect.addEventListener(evt, schedule);
+    el.qrUrl.addEventListener(evt, schedule);
     el.widthMm.addEventListener(evt, schedule);
     el.heightMm.addEventListener(evt, schedule);
   });

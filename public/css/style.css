@@ -283,6 +283,26 @@ button:disabled { background: #aaa5; cursor: not-allowed; }
   margin-top: var(--para-gap);
 }
 
+/* 展品介绍二维码：底部固定 22mm 区域，18mm 码图水平居中、垂直位于区域中央
+   （区域高 22mm，上下各留 2mm 空白；左右空白随签宽，至少 ≥6mm）。
+   文本排版时该高度已先行扣除，故此处可脱离文档流绝对定位，不与正文重叠。 */
+.label-qr {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 22mm;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.label-qr[hidden] { display: none; }
+.label-qr-svg {
+  width: 18mm;
+  height: 18mm;
+  display: block;
+}
+
 .label-error {
   position: absolute;
   inset: 8mm;
@@ -322,5 +342,11 @@ button:disabled { background: #aaa5; cursor: not-allowed; }
     box-shadow: none;
     transform: none !important;
     margin: 0;
+  }
+  /* 二维码的黑色模块必须保持纯黑，避免部分浏览器打印时做背景/颜色调整导致难扫描 */
+  .label-qr-svg,
+  .label-qr-svg * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
 }
