@@ -34,6 +34,12 @@
     </label>
 
     <label class="field">
+      <span class="field-label">展品介绍链接（可选，https:// 开头，UTF-8 ≤ 100 字节）</span>
+      <input id="qrLink" type="text" placeholder="如：https://example.com/item/123 ；填写后展签底部生成二维码">
+      <span class="field-hint" id="qrHint">未填写链接，不生成二维码</span>
+    </label>
+
+    <label class="field">
       <span class="field-label">中文专名保护表（每行一个词，最多 20 个，每个 1～12 字）</span>
       <textarea id="protect" rows="4" placeholder="每行一个不可断开的中文专名，如：&#10;仰韶村&#10;黄河中游&#10;空行忽略、重复词自动去重；词内不得含空格。"></textarea>
       <span class="field-hint" id="protectHint">未设置保护词</span>
@@ -91,6 +97,9 @@
         <li><strong>中英对照双栏</strong>：填写英文译文后，标题横跨整签，中文原文与译文在正文区左右并列（栏间距 6mm），
           两栏按各自实际栏宽独立断行，取<strong>两栏都能容纳的最大共享字号</strong>，高度按较高一栏与标题共同核算；
           译文留空则保持现有单栏。</li>
+        <li><strong>展品介绍二维码</strong>：填写 https:// 开头的链接（UTF-8 ≤ 100 字节、不含空白字符）后，
+          浏览器本地生成二维码（不依赖外部服务）：展签底部固定留出 22mm 区域，18mm 码图居中、四周留白 ≥2mm；
+          排版先扣除该区域再为标题与正文选最大字号；链接非法或无法编码时报错并禁用打印，留空即恢复原版式。</li>
         <li><strong>修订对照</strong>：填写修订稿（≤300 字）后，按 Unicode 字符求最短增删对齐，
           同代价时固定优先保留原文较早字符；对照区中绿色为新增、红色删除线为已删。</li>
         <li>原稿与修订稿沿用当前尺寸与英文译文<strong>分别排版</strong>，对照表展示两版字号、中文行数与能否容纳的变化；
@@ -108,6 +117,7 @@
           <div id="labelBody" class="label-col"></div>
           <div id="labelBodyEn" class="label-col label-col-en"></div>
         </div>
+        <div id="labelQr" class="label-qr" hidden><canvas id="qrCanvas"></canvas></div>
         <div id="labelError" class="label-error" hidden></div>
       </div>
     </div>
@@ -116,6 +126,7 @@
 
 <script src="/js/diff.js"></script>
 <script src="/js/layout.js"></script>
+<script src="/js/qrcode.js"></script>
 <script src="/js/app.js"></script>
 </body>
 </html>

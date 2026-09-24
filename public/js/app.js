@@ -14,11 +14,17 @@
   var REV_LIMIT = 300;            // 修订稿字数上限（按 Unicode 字符计）
   var PROTECT_MAX = 20;           // 专名保护词数量上限
   var PROTECT_MAX_LEN = 12;       // 单个专名保护词的 Unicode 字符上限
+  var QR_BAND_MM = 22;            // 底部为二维码固定留出的区域高度
+  var QR_IMG_MM = 18;             // 二维码码图边长
+  var QR_MIN_BLANK_MM = 2;        // 码图四周最少空白
+  var QR_MAX_BYTES = 100;         // 链接 UTF-8 字节上限
 
   var el = {
     title: document.getElementById('title'),
     body: document.getElementById('body'),
     bodyEn: document.getElementById('bodyEn'),
+    qrLink: document.getElementById('qrLink'),
+    qrHint: document.getElementById('qrHint'),
     bodyRev: document.getElementById('bodyRev'),
     revCount: document.getElementById('revCount'),
     protect: document.getElementById('protect'),
@@ -33,6 +39,8 @@
     labelContent: document.getElementById('labelContent'),
     labelBody: document.getElementById('labelBody'),
     labelBodyEn: document.getElementById('labelBodyEn'),
+    labelQr: document.getElementById('labelQr'),
+    qrCanvas: document.getElementById('qrCanvas'),
     labelError: document.getElementById('labelError'),
     compare: document.getElementById('compare'),
     diffView: document.getElementById('diffView'),
@@ -125,18 +133,73 @@
     return ch >= 0x2000 && ch <= 0x200a;
   }
 
+  // ---------- 展品介绍链接校验 ----------
+  // 空链接（或仅空白）→ null：不生成二维码，恢复原版式；
+  // 合法 → { text, bytes }；非法 → { error }。
+  // 规则：https:// 开头的完整链接、不含空白/控制字符、UTF-8 编码 ≤ 100 字节。
+  function parseQrLink(raw) {
+    var text = String(raw == null ? '' : raw).trim();
+    if (!text) return null;
+    if (/\s/.test(text)) {
+      return { error: '链接中不能包含空格、换行等空白字符。' };
+    }
+    // eslint-disable-next-line no-control-regex
+    if (/[\x00-\x1f\x7f]/.test(text)) {
+      return { error: '链接中不能包含不可见的控制字符。' };
+    }
+    var url;
+    try {
+      url = new URL(text);
+    } catch (e) {
+      return { error: '链接格式无效：请输入完整链接，如 https://example.com/item/123 。' };
+    }
+    if (url.protocol !== 'https:') {
+      return { error: '仅支持 https:// 开头的链接（当前为 ' +
+        (url.protocol.replace(/:$/, '') || '未知协议') + '://）。' };
+    }
+    if (!url.hostname) {
+      return { error: '链接缺少主机名，如 https://example.com/item/123 。' };
+    }
+    var bytes = window.LabelQR.byteLength(text);
+    if (bytes > QR_MAX_BYTES) {
+      return { error: '链接 UTF-8 编码后为 ' + bytes + ' 字节，超过 ' +
+        QR_MAX_BYTES + ' 字节上限，请缩短链接。' };
+    }
+    return { text: text, bytes: bytes };
+  }
+
   // ---------- 一次排版尝试 ----------
   // 单栏（无英文译文）：正文占满内容宽。
   // 双栏（填写译文）：标题横跨整签，中文/英文按扣除 6mm 栏间距后的实际栏宽
   //                  各自独立断行，共用同一个正文字号。
+  // 填写链接（input.reserveBottomMm = 22）：先从可用高度中扣除底部二维码区，
+  //                  再按现有规则核算标题与正文。
   // 返回 { ok:true, ... } 或 { ok:false, reason: 'config'|'width'|'height', ... }
   // 各种返回均带 zhLines / enLines（中文/英文行数；宽度失败无法规划时为 null），
   // 供修订对照表展示两版行数。
   function tryLayout(input, widthMm, heightMm, bodyPx) {
+    var reserveMm = input.reserveBottomMm || 0;
     var contentW = (widthMm - PADDING_MM * 2) * PX_PER_MM;
-    var contentH = (heightMm - PADDING_MM * 2) * PX_PER_MM;
+    var contentH = (heightMm - PADDING_MM * 2 - reserveMm) * PX_PER_MM;
     if (contentW <= 4 || contentH <= 4) {
-      return { ok: false, reason: 'config', message: '标签尺寸过小：内边距为 8mm，请加大宽或高。' };
+      return {
+        ok: false, reason: 'config',
+        message: reserveMm > 0
+          ? '标签尺寸过小：内边距 8mm 之外，底部还需固定留出 ' + QR_BAND_MM +
+            'mm 二维码区；请加大宽或高，或清空链接恢复原版式。'
+          : '标签尺寸过小：内边距为 8mm，请加大宽或高。'
+      };
+    }
+    // 码图 18mm + 两侧各至少 2mm 空白：内容宽度不足时无法放置二维码
+    if (reserveMm > 0 &&
+        contentW < (QR_IMG_MM + QR_MIN_BLANK_MM * 2) * PX_PER_MM) {
+      return {
+        ok: false, reason: 'config',
+        message: '标签宽度不足以放置二维码：' + QR_IMG_MM + 'mm 码图加两侧各 ' +
+          QR_MIN_BLANK_MM + 'mm 空白共需约 ' + (QR_IMG_MM + QR_MIN_BLANK_MM * 2) +
+          'mm 内容宽度（当前约 ' + Math.round(contentW / PX_PER_MM) +
+          'mm）；请加宽标签或清空链接。'
+      };
     }
 
     var dual = !!input.dual;
@@ -302,17 +365,21 @@
       '、缩短保护词或修改文案——不会拆词、截断显示。';
   }
 
-  function heightFailureMessage(result, dual) {
+  function heightFailureMessage(result, dual, qrReserved) {
     var where = '';
     if (dual) {
       // 较高一栏（计入标题时以正文两栏比较）
       if (result.enH > result.zhH) where = '（英文译文栏较高）';
       else if (result.zhH > 0) where = '（中文原文栏较高）';
     }
-    return '内容在 12–24px 任何字号下都超出标签高度' + where + '（需要约 ' +
+    var qrNote = qrReserved
+      ? '（可用高度已先扣除底部 ' + QR_BAND_MM + 'mm 二维码区）'
+      : '';
+    return '内容在 12–24px 任何字号下都超出标签高度' + where + qrNote + '（需要约 ' +
       Math.round(result.totalH / PX_PER_MM) + 'mm，可用 ' +
       Math.round(result.contentH / PX_PER_MM) + 'mm）。\n' +
-      '请加高标签或精简文案——不会截断显示。';
+      '请加高标签或精简文案' +
+      (qrReserved ? '，或清空链接恢复原版式' : '') + '——不会截断显示。';
   }
 
   // ---------- 渲染 ----------
@@ -337,6 +404,26 @@
   }
 
   var lastGood = null;
+  var currentQr = null; // 当前生效的二维码（LabelQR.encode 结果）；null 表示不生成
+
+  // 把 QR 模块矩阵画到 canvas 上（白底黑块；显示尺寸由 CSS 固定为 18mm，
+  // 码图之外的空白由底部 22mm 预留区与内边距保证，预览与打印共用同一 canvas）
+  function drawQr(canvas, modules) {
+    var size = modules.length;
+    var scale = 8; // 内部分辨率：每模块 8×8 像素，18mm 下约 460DPI
+    canvas.width = size * scale;
+    canvas.height = size * scale;
+    var ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#000';
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x < size; x++) {
+        if (modules[y][x]) ctx.fillRect(x * scale, y * scale, scale, scale);
+      }
+    }
+  }
 
   // 把一次成功的排版结果写入展签 DOM 与 CSS 变量（预览与打印共用此结果）
   function applyResult(input, result) {
@@ -367,10 +454,19 @@
     if (result.enPlan) {
       buildLines(el.labelBodyEn, result.enPlan);
     }
+
+    // 二维码：填写合法链接时固定在底部 22mm 预留区内居中显示
+    if (currentQr) {
+      drawQr(el.qrCanvas, currentQr.modules);
+      el.labelQr.hidden = false;
+    } else {
+      el.labelQr.hidden = true;
+    }
   }
 
   // 成功状态行文案
   function successInfo(input, result) {
+    var reserveMm = input.reserveBottomMm || 0;
     var usedH = Math.round(result.contentH / PX_PER_MM);
     var info = '正文字号 ' + result.bodyPx + 'px（标题 ' +
       Math.round(result.titlePx * 10) / 10 + 'px）';
@@ -383,7 +479,8 @@
     }
     if (result.titlePlan) info += '，标题 ' + result.titlePlan.totalLines + ' 行';
     info += '，内容高约 ' + usedH + 'mm / ' +
-      Math.round(input.heightMm - PADDING_MM * 2) + 'mm';
+      Math.round(input.heightMm - PADDING_MM * 2 - reserveMm) + 'mm';
+    if (reserveMm > 0) info += '（底部已预留 ' + QR_BAND_MM + 'mm 二维码区）';
     return info;
   }
 
@@ -406,7 +503,7 @@
       msg = widthFailureMessage(result, input.dual);
       tag = '超宽';
     } else {
-      msg = heightFailureMessage(result, input.dual);
+      msg = heightFailureMessage(result, input.dual, (input.reserveBottomMm || 0) > 0);
       tag = '超高';
     }
     var prefix = versionName
@@ -482,7 +579,7 @@
         bad: true
       };
     }
-    return { text: '✗ 尺寸无效', bad: true };
+    return { text: '✗ ' + (r.message || '尺寸无效'), bad: true };
   }
 
   function verBrief(r) {
@@ -540,8 +637,37 @@
     input.enTrim = input.bodyEn.trim();
     input.dual = input.enTrim.length > 0;
 
-    // 中文专名保护表：原稿与修订稿应用同一张表；非法时禁用打印、不进行排版
+    // 展品介绍链接 → 底部二维码；非法或无法编码时报错并禁用打印，空链接恢复原版式
     setDualMode(input.dual);
+    var qrParsed = parseQrLink(el.qrLink.value);
+    var qrError = qrParsed && qrParsed.error ? qrParsed.error : null;
+    currentQr = null;
+    if (!qrError && qrParsed) {
+      var qrEnc = window.LabelQR.encode(qrParsed.text);
+      if (qrEnc.error) {
+        qrError = '链接无法编码为二维码：数据超出 QR 版本 ' +
+          window.LabelQR.MAX_VERSION + '（纠错 M）约 ' + qrEnc.maxBytes +
+          ' 字节的容量上限。';
+      } else {
+        currentQr = qrEnc;
+      }
+    }
+    input.reserveBottomMm = currentQr ? QR_BAND_MM : 0;
+    el.qrHint.classList.toggle('err', !!qrError);
+    if (qrError) {
+      el.qrHint.textContent = qrError;
+      setStatus(qrError, 'err');
+      showError('展品介绍链接有误\n' + qrError);
+      el.printBtn.disabled = true;
+      fitScale();
+      return;
+    }
+    el.qrHint.textContent = currentQr
+      ? '已生成二维码：' + qrParsed.bytes + ' / ' + QR_MAX_BYTES +
+        ' 字节（版本 V' + currentQr.version + '，浏览器本地生成）'
+      : '未填写链接，不生成二维码';
+
+    // 中文专名保护表：原稿与修订稿应用同一张表；非法时禁用打印、不进行排版
     var parsedProtect = parseProtectedWords(el.protect.value);
     el.protectHint.classList.toggle('err', !!parsedProtect.error);
     if (parsedProtect.error) {
@@ -594,7 +720,8 @@
       bodyEn: input.bodyEn,
       widthMm: input.widthMm,
       heightMm: input.heightMm,
-      protectedWords: input.protectedWords
+      protectedWords: input.protectedWords,
+      reserveBottomMm: input.reserveBottomMm
     };
     revInput.titleTrim = input.titleTrim;
     revInput.bodyTrim = revTrim;
@@ -624,6 +751,7 @@
   function showError(message) {
     el.labelError.textContent = message;
     el.labelError.hidden = false;
+    el.labelQr.hidden = true;
     el.labelTitle.innerHTML = '';
     el.labelBody.innerHTML = '';
     el.labelBodyEn.innerHTML = '';
@@ -678,6 +806,7 @@
     el.title.addEventListener(evt, schedule);
     el.body.addEventListener(evt, schedule);
     el.bodyEn.addEventListener(evt, schedule);
+    el.qrLink.addEventListener(evt, schedule);
     el.protect.addEventListener(evt, schedule);
     el.widthMm.addEventListener(evt, schedule);
     el.heightMm.addEventListener(evt, schedule);

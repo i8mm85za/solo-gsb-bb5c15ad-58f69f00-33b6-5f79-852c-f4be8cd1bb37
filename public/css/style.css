@@ -283,6 +283,24 @@ button:disabled { background: #aaa5; cursor: not-allowed; }
   margin-top: var(--para-gap);
 }
 
+/* 底部二维码区：固定 22mm 高，18mm 码图居中，四周留白 ≥2mm */
+.label-qr {
+  position: absolute;
+  left: 8mm;
+  right: 8mm;
+  bottom: 8mm;
+  height: 22mm;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.label-qr[hidden] { display: none; }
+.label-qr canvas {
+  width: 18mm;
+  height: 18mm;
+  image-rendering: pixelated;
+}
+
 .label-error {
   position: absolute;
   inset: 8mm;
